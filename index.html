@@ -451,7 +451,6 @@ footer .heart{color:#e8aebc}
 }
 .sc-photo img{
   width:100%;height:100%;object-fit:cover;display:none;
-  filter:saturate(1.6) contrast(1.16) brightness(1.05);
 }
 .sc-placeholder{
   position:absolute;inset:0;display:flex;flex-direction:column;gap:10px;
@@ -700,7 +699,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 
       <p class="frame-msg" id="frameMsg" role="status" aria-live="polite"></p>
 
-      <p class="honest-note">এটি কোনো AI দিয়ে বানানো ছবি নয় — আপনার নিজের ব্রাউজারেই তৈরি একটি কার্টুন-স্টাইল ফিল্টার (উজ্জ্বল রঙ ও পোস্টার-ধাঁচের শেড) আর আমাদের বিয়ের শোকেস ফ্রেম।</p>
+      <p class="honest-note">এটি কোনো AI দিয়ে বানানো ছবি নয় — আপনার ছবিটাকে আপনার নিজের ব্রাউজারেই সত্যিকারের কার্টুনে বদলে দেওয়া হয়: রংগুলো flat ব্যান্ডে ভাগ হয়ে যায় আর মুখ ও পোশাকের ধার ঘিরে গাঢ় outline বসে, তারপর ছবিটি আমাদের বিয়ের শোকেস ফ্রেমে সাজানো হয়।</p>
       <p class="privacy-note"><svg class="ic-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15.2" r="1.4"/></svg> <b>গোপনীয়তা:</b> আপনার ছবি শুধু আপনার নিজের ফোন/ব্রাউজারেই তৈরি হয় — ছবিটি কোথাও আপলোড বা সংরক্ষণ করা হয় না।</p>
     </div>
   </section>
@@ -801,24 +800,106 @@ button:disabled{opacity:.45;cursor:not-allowed}
       posY=document.getElementById('posY'),
       msg=document.getElementById('frameMsg'),
       labelText=document.getElementById('uploadLabelText');
-  var fx=50, fy=50, bmp=null, objUrl=null;
+  var fx=50, fy=50, bmp=null, objUrl=null, cartUrl=null;
 
   function applyPos(){ img.style.objectPosition=fx+'% '+fy+'%'; }
   posX.addEventListener('input',function(){ fx=+posX.value; applyPos(); });
   posY.addEventListener('input',function(){ fy=+posY.value; applyPos(); });
 
+  /* ---- real cartoon effect, made entirely in the browser ----
+     1) shrink + re-enlarge the photo so fine detail melts into flat areas
+     2) boost colour, then quantize each channel into a few flat bands
+     3) Sobel edge detection on the smoothed photo -> dark outlines
+        darkened over the flat colours (faces, clothes, objects)      */
+  function cartoonify(source, done){
+    try{
+      var iw=source.width, ih=source.height;
+      if(!iw || !ih){ done(null); return; }
+      var maxDim=1080;
+      var sc=Math.min(1, maxDim/Math.max(iw,ih));
+      var W=Math.max(2,Math.round(iw*sc)), H=Math.max(2,Math.round(ih*sc));
+
+      var small=document.createElement('canvas');
+      small.width=Math.max(2,Math.round(W*0.45));
+      small.height=Math.max(2,Math.round(H*0.45));
+      var sctx=small.getContext('2d');
+      sctx.imageSmoothingEnabled=true; sctx.imageSmoothingQuality='high';
+      sctx.drawImage(source,0,0,small.width,small.height);
+
+      var flat=document.createElement('canvas'); flat.width=W; flat.height=H;
+      var fctx=flat.getContext('2d');
+      fctx.imageSmoothingEnabled=true; fctx.imageSmoothingQuality='high';
+      try{ fctx.filter='blur(1px) saturate(1.3)'; }catch(e){}
+      fctx.drawImage(small,0,0,W,H);
+      try{ fctx.filter='none'; }catch(e){}
+
+      var idata=fctx.getImageData(0,0,W,H), d=idata.data, n=W*H, i, k;
+
+      var lum=new Float32Array(n);
+      for(i=0,k=0;i<d.length;i+=4,k++){
+        lum[k]=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      }
+
+      var edge=new Float32Array(n);
+      for(var y=1;y<H-1;y++){
+        for(var xx=1;xx<W-1;xx++){
+          var idx=y*W+xx;
+          var gx=-lum[idx-W-1]-2*lum[idx-1]-lum[idx+W-1]
+                 +lum[idx-W+1]+2*lum[idx+1]+lum[idx+W+1];
+          var gy=-lum[idx-W-1]-2*lum[idx-W]-lum[idx-W+1]
+                 +lum[idx+W-1]+2*lum[idx+W]+lum[idx+W+1];
+          var mag=Math.sqrt(gx*gx+gy*gy);
+          var e=(mag-110)/260; if(e<0)e=0; if(e>1)e=1;
+          edge[idx]=e;
+        }
+      }
+
+      var levels=6, last=levels-1;
+      for(k=0;k<n;k++){
+        var o=k*4, L=lum[k];
+        var r=L+(d[o]-L)*1.22, g=L+(d[o+1]-L)*1.22, b=L+(d[o+2]-L)*1.22;
+        r=Math.round((r/255)*last)/last*255;
+        g=Math.round((g/255)*last)/last*255;
+        b=Math.round((b/255)*last)/last*255;
+        var f=1-0.82*edge[k];
+        d[o]=r*f; d[o+1]=g*f; d[o+2]=b*f;
+      }
+      fctx.putImageData(idata,0,0);
+      done(flat);
+    }catch(err){ done(null); }
+  }
+
   function useSource(source, url){
-    bmp=source;
     if(objUrl && objUrl!==url) URL.revokeObjectURL(objUrl);
     objUrl=url;
-    img.onload=function(){ img.style.display='block'; ph.style.display='none'; };
-    img.onerror=function(){ msg.textContent='দুঃখিত, এই ছবিটি দেখানো যাচ্ছে না। অন্য একটি ছবি চেষ্টা করুন।'; };
-    img.src=url;
-    fx=50; fy=50; posX.value=50; posY.value=50; applyPos();
-    dl.disabled=false;
-    posBox.style.display='block';
-    labelText.textContent='অন্য ছবি বাছুন';
-    msg.textContent='বাহ! আপনার কার্টুন ফ্রেম তৈরি। পছন্দ হলে “ডাউনলোড করুন” বাটনে ট্যাপ করুন।';
+    dl.disabled=true;
+    msg.textContent='আপনার ছবিটাকে কার্টুন বানানো হচ্ছে… একটু অপেক্ষা করুন।';
+    setTimeout(function(){
+      cartoonify(source,function(cartoon){
+        bmp=cartoon||source;
+        function showFinal(srcUrl){
+          img.onload=function(){ img.style.display='block'; ph.style.display='none'; };
+          img.onerror=function(){ msg.textContent='দুঃখিত, এই ছবিটি দেখানো যাচ্ছে না। অন্য একটি ছবি চেষ্টা করুন।'; };
+          img.src=srcUrl;
+          fx=50; fy=50; posX.value=50; posY.value=50; applyPos();
+          dl.disabled=false;
+          posBox.style.display='block';
+          labelText.textContent='অন্য ছবি বাছুন';
+          msg.textContent=cartoon
+            ? 'বাহ! আপনার ছবি এখন সত্যিকারের কার্টুন — পছন্দ হলে “ডাউনলোড করুন” বাটনে ট্যাপ করুন।'
+            : 'কার্টুন তৈরি করা যায়নি, তবে আপনার ছবিটি ফ্রেমে বসানো হয়েছে।';
+        }
+        if(cartoon && cartoon.toBlob){
+          cartoon.toBlob(function(blob){
+            if(blob){
+              if(cartUrl) URL.revokeObjectURL(cartUrl);
+              cartUrl=URL.createObjectURL(blob);
+              showFinal(cartUrl);
+            } else { showFinal(url); }
+          },'image/png');
+        } else { showFinal(url); }
+      });
+    },40);
   }
 
   input.addEventListener('change',function(){
@@ -847,26 +928,17 @@ button:disabled{opacity:.45;cursor:not-allowed}
     x.closePath();
   }
 
-  /* draw the guest photo cover-cropped with cartoon filter + posterized colours */
+  /* the source handed in here is already the cartoonified photo
+     (see cartoonify above) — just cover-crop it into the frame slot */
   function cartoonCanvas(source,w,h){
     var c=document.createElement('canvas'); c.width=w; c.height=h;
     var x=c.getContext('2d');
-    try{ x.filter='saturate(1.55) contrast(1.14) brightness(1.05)'; }catch(e){}
+    x.imageSmoothingEnabled=true; x.imageSmoothingQuality='high';
     var iw=source.width, ih=source.height;
     var scale=Math.max(w/iw,h/ih);
     var dw=iw*scale, dh=ih*scale;
     var dx=-(dw-w)*(fx/100), dy=-(dh-h)*(fy/100);
     x.drawImage(source,dx,dy,dw,dh);
-    try{ x.filter='none'; }catch(e){}
-    try{
-      var idata=x.getImageData(0,0,w,h), d=idata.data, step=36, i;
-      for(i=0;i<d.length;i+=4){
-        d[i]  =Math.round(d[i]/step)*step;
-        d[i+1]=Math.round(d[i+1]/step)*step;
-        d[i+2]=Math.round(d[i+2]/step)*step;
-      }
-      x.putImageData(idata,0,0);
-    }catch(e){}
     return c;
   }
 
